@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      // Absolute first priority: Ensure window.fetch is writable and configurable
+      // This prevents errors from extensions or scripts that try to wrap/monkey-patch fetch
+      // in environments where it is originally defined as a read-only getter.
+      (function() {
+        try {
+          const originalFetch = window.fetch;
+          let interceptorFetch = originalFetch;
+          
+          Object.defineProperty(window, 'fetch', {
+            get: function() {
+              return interceptorFetch;
+            },
+            set: function(v) {
+              interceptorFetch = v;
+            },
+            configurable: true,
+            enumerable: true
+          });
+        } catch (e) {
+          // Fallback if defineProperty fails
+          console.warn("Fetch fix failed:", e);
+        }
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ACI COFFRAGE - Engineering Suite</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

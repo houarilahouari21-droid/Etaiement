@@ -1,0 +1,6 @@
+{
+  "name": "CoffrageAI Assistant",
+  "description": "Gestion de projet de coffrage avec assistant IA pour l'extraction de données de plans (images/PDF).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
