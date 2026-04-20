@@ -92,6 +92,7 @@ export default function App() {
   
   const [editingId, setEditingId] = useState<number | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiProvider, setAiProvider] = useState<'google' | 'xai'>('google');
   const [pendingExtractions, setPendingExtractions] = useState<any[]>([]);
   
   // Custom UI Feedback State
@@ -335,15 +336,16 @@ export default function App() {
 
   // --- AI Logic ---
   const handleAiExtraction = async (file: File) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const xaiKey = process.env.XAI_API_KEY;
     
-    if (!apiKey) {
+    if (aiProvider === 'google' && !geminiKey) {
       showToast("Clé API Gemini manquante. Configurez GEMINI_API_KEY.", "error");
       return;
     }
-
-    if (!aiRef.current) {
-      aiRef.current = new GoogleGenAI({ apiKey });
+    if (aiProvider === 'xai' && !xaiKey) {
+      showToast("Clé API xAI (Grok) manquante. Configurez XAI_API_KEY.", "error");
+      return;
     }
 
     setIsAiLoading(true);
@@ -355,49 +357,100 @@ export default function App() {
       reader.readAsDataURL(file);
       const base64 = await base64Promise;
 
-      const response = await aiRef.current.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          {
-            parts: [
-              {
-                inlineData: {
-                  data: base64,
-                  mimeType: file.type
+      let extracted: any[] = [];
+
+      if (aiProvider === 'google') {
+        if (!aiRef.current) {
+          aiRef.current = new GoogleGenAI({ apiKey: geminiKey! });
+        }
+        const response = await aiRef.current.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: [
+            {
+              parts: [
+                {
+                  inlineData: {
+                    data: base64,
+                    mimeType: file.type
+                  }
+                },
+                {
+                  text: `Tu es un expert en coffrage. Analyse ce plan de structure et extrais les informations sur les dalles et les poutres.
+                  Pour chaque élément trouvé, donne :
+                  1. Le nom unique identifiant (ex: DALLE D1, POUTRE P2).
+                  2. L'épaisseur ou profondeur brute en millimètres (mm).
+                  3. Le type : "DALLE" ou "POUTRE".
+                  
+                  Réponds UNIQUEMENT avec un tableau JSON valide.
+                  Exemple: [{"name": "Dalle 1", "thickness": 200, "type": "DALLE"}]
+                  Si tu ne trouves rien, renvoie un tableau vide [].`
                 }
-              },
-              {
-                text: `Tu es un expert en coffrage. Analyse ce plan de structure et extrais les informations sur les dalles et les poutres.
-                Pour chaque élément trouvé, donne :
-                1. Le nom unique identifiant (ex: DALLE D1, POUTRE P2).
-                2. L'épaisseur ou profondeur brute en millimètres (mm).
-                3. Le type : "DALLE" ou "POUTRE".
-                
-                Réponds UNIQUEMENT avec un tableau JSON valide.
-                Exemple: [{"name": "Dalle 1", "thickness": 200, "type": "DALLE"}]
-                Si tu ne trouves rien, renvoie un tableau vide [].`
+              ]
+            }
+          ],
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  thickness: { type: Type.NUMBER },
+                  type: { type: Type.STRING, enum: ["DALLE", "POUTRE"] }
+                },
+                required: ["name", "thickness", "type"]
               }
-            ]
-          }
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                thickness: { type: Type.NUMBER },
-                type: { type: Type.STRING, enum: ["DALLE", "POUTRE"] }
-              },
-              required: ["name", "thickness", "type"]
             }
           }
-        }
-      });
+        });
+        extracted = JSON.parse(response.text);
+      } else {
+        // xAI (Grok) Vision API Call
+        const res = await fetch("https://api.x.ai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${xaiKey}`
+          },
+          body: JSON.stringify({
+            model: "grok-2-vision-1212",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: `Tu es un expert en coffrage. Analyse ce plan de structure et extrais les informations sur les dalles et les poutres.
+                    Pour chaque élément trouvé, donne :
+                    1. Le nom unique identifiant (ex: DALLE D1, POUTRE P2).
+                    2. L'épaisseur ou profondeur brute en millimètres (mm).
+                    3. Le type : "DALLE" ou "POUTRE".
+                    
+                    Réponds UNIQUEMENT avec un tableau JSON valide.
+                    Exemple: [{"name": "Dalle 1", "thickness": 200, "type": "DALLE"}]
+                    Si tu ne trouves rien, renvoie un tableau vide [].`
+                  },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:${file.type};base64,${base64}`
+                    }
+                  }
+                ]
+              }
+            ],
+            response_format: { type: "json_object" }
+          })
+        });
 
-      const extracted = JSON.parse(response.text);
+        if (!res.ok) throw new Error(`xAI Error: ${res.statusText}`);
+        const data = await res.json();
+        const content = data.choices[0].message.content;
+        // The result might be wrapped in an object or just the array
+        const parsed = JSON.parse(content);
+        extracted = Array.isArray(parsed) ? parsed : (parsed.elements || parsed.items || []);
+      }
       if (extracted.length === 0) {
         showToast("Aucune donnée détectée. Essayez une image plus claire.", "info");
         return;
@@ -584,11 +637,19 @@ CHARGES VIVES DES TRAVAILLEURS : ${Math.round(formLive)} LBS/PI²<br/>
 
         {/* AI Sidebar Panel */}
         <div className="mt-auto bg-ai-accent/10 border border-ai-accent/30 rounded-[10px] p-4">
-          <div className="text-[11px] font-bold text-ai-accent uppercase tracking-wider mb-2 flex items-center gap-2">
-            <Sparkles size={12} /> Assistant IA Plan
+          <div className="text-[11px] font-bold text-ai-accent uppercase tracking-wider mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-2"><Sparkles size={12} /> Assistant IA</span>
+            <select 
+              value={aiProvider} 
+              onChange={(e) => setAiProvider(e.target.value as any)}
+              className="bg-sidebar border border-white/10 rounded px-1 py-0.5 text-[9px] outline-none"
+            >
+              <option value="google">GEMINI (Google)</option>
+              <option value="xai">GROK (xAI)</option>
+            </select>
           </div>
           <p className="text-[11px] text-white/70 leading-relaxed">
-            Déposez vos plans PDF/IMG pour extraire automatiquement les épaisseurs.
+            Analyse vos plans PDF/IMG. Configurez vos clés API pour utiliser Gemini ou Grok.
           </p>
           <div className="mt-3 text-[10px] font-mono opacity-50">Status: {isAiLoading ? 'Analyse...' : 'Prêt à analyser'}</div>
         </div>
@@ -737,7 +798,20 @@ CHARGES VIVES DES TRAVAILLEURS : ${Math.round(formLive)} LBS/PI²<br/>
 
                 <div className="flex flex-col gap-5 overflow-hidden">
                    <div className="flex flex-col gap-2 shrink-0">
-                      <h3 className="text-[11px] font-bold text-text-muted uppercase tracking-[0.1em]">Scanneur de Plan IA</h3>
+                      <div className="flex justify-between items-center mb-1">
+                        <h3 className="text-[11px] font-bold text-text-muted uppercase tracking-[0.1em]">Scanneur de Plan IA</h3>
+                        <div className="flex items-center gap-2">
+                           <span className="text-[9px] font-bold text-text-muted uppercase tracking-widest">Moteur :</span>
+                           <select 
+                             value={aiProvider} 
+                             onChange={(e) => setAiProvider(e.target.value as any)}
+                             className="bg-surface border border-border rounded px-1.5 py-0.5 text-[9px] font-bold text-accent outline-none"
+                           >
+                             <option value="google">Google Gemini</option>
+                             <option value="xai">xAI Grok</option>
+                           </select>
+                        </div>
+                      </div>
                       <div className="bg-[#fdfaff] border-2 border-dashed border-ai-accent rounded-xl p-8 text-center flex flex-col items-center justify-center gap-4 relative">
                         {isAiLoading && <div className="absolute inset-0 bg-white/60 flex items-center justify-center z-10 rounded-xl"><Loader2 className="animate-spin text-ai-accent" size={32} /></div>}
                         <div className="text-3xl">📄</div>
